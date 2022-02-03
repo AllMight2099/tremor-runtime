@@ -18,7 +18,7 @@ use self::raw::{ArgsExprsRaw, ConfigRaw, DefinitioalArgsRaw, QueryRaw};
 
 use super::{
     error_generic, error_no_locals,
-    module::ModuleContent,
+    helper::Scope,
     node_id::NodeId,
     raw::{IdentRaw, ImutExprRaw, LiteralRaw},
     visitors::{ArgsRewriter, ConstFolder},
@@ -47,7 +47,7 @@ pub struct Query<'script> {
     /// Params if this is a modular query
     pub params: DefinitioalArgs<'script>,
     /// definitions
-    pub content: ModuleContent<'script>,
+    pub scope: Scope<'script>,
 }
 
 /// Query statement
@@ -321,10 +321,8 @@ impl_fqn!(PipelineDefinition);
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PipelineCreate {
     pub(crate) mid: usize,
-    /// Module of the pipeline
-    pub module: Vec<String>,
-    /// ID of the pipeline
-    pub id: String,
+    /// The node id of the pipeline definition we want to create
+    pub node_id: NodeId,
     /// Map of pipeline ports and internal stream id
     pub port_stream_map: HashMap<String, String>,
 }

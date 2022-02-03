@@ -27,18 +27,17 @@ use super::{
     ScriptCreate, ScriptDefinition, Select, SelectStmt, Serialize, Stmt, StreamStmt, Upable, Value,
     WindowDefinition, WindowKind,
 };
+use crate::{ast::InvokeAggrFn, impl_expr};
 use crate::{
     ast::{
         node_id::{BaseRef, NodeId},
+        raw::UseRaw,
         visitors::{ArgsRewriter, ConstFolder, GroupByExprExtractor, TargetEventRef},
         walkers::{ImutExprWalker, QueryWalker},
         Consts, Ident,
     },
     errors::err_generic,
-};
-use crate::{
-    ast::{raw::TopLevelExprRaw, InvokeAggrFn},
-    impl_expr,
+    ModuleManager,
 };
 use beef::Cow;
 use std::iter::FromIterator;
@@ -94,7 +93,7 @@ impl<'script> QueryRaw<'script> {
             config,
             stmts,
             node_meta: helper.meta.clone(),
-            content: helper.scope.content.clone(),
+            scope: helper.scope.clone(),
         })
     }
 }
@@ -121,10 +120,13 @@ pub enum StmtRaw<'script> {
     /// we're forced to make this pub because of lalrpop
     SelectStmt(Box<SelectRaw<'script>>),
     /// we're forced to make this pub because of lalrpop
-    Expr(Box<TopLevelExprRaw<'script>>),
+    Use(UseRaw),
+    // /// we're forced to make this pub because of lalrpop
+    // Const(ConstRaw<'script>),
+    // /// we're forced to make this pub because of lalrpop
+    // FnDecl(FnDeclRaw<'script>),
 }
 impl<'script> StmtRaw<'script> {
-    const BAD_EXPR: &'static str = "Expression in wrong place error";
     const BAD_SUBQ: &'static str = "Pipeline Stmt in wrong place error";
 }
 
@@ -176,7 +178,12 @@ impl<'script> Upable<'script> for StmtRaw<'script> {
                 Ok(None)
             }
             StmtRaw::PipelineCreate(ref sq) => error_generic(sq, sq, &Self::BAD_SUBQ, &helper.meta),
-            StmtRaw::Expr(m) => error_generic(&*m, &*m, &Self::BAD_EXPR, &helper.meta),
+            StmtRaw::Use(UseRaw { alias, module, .. }) => {
+                let mid = ModuleManager::load(dbg!(&module))?;
+                let alias = alias.unwrap_or_else(|| module.id.clone());
+                helper.scope().add_module_alias(dbg!(alias), mid);
+                Ok(None)
+            }
         }
     }
 }
@@ -346,11 +353,13 @@ impl<'script> PipelineInlineRaw<'script> {
         mut helper: &mut Helper<'script, 'registry>,
         args: Option<&Value<'script>>,
     ) -> Result<PipelineCreate> {
-        let target = self.target.clone().with_prefix(&[]); // FIXME
-                                                           // Calculate the fully qualified name for the pipeline declaration.
-                                                           // let fq_pipeline_defn = target.fqn();
+        let target = self.target.clone().with_prefix(&[]);
+        // FIXME
+        // Calculate the fully qualified name for the pipeline declaration.
+        // let fq_pipeline_defn = target.fqn();
 
         let pipeline_decl = helper.get_pipeline(&target).ok_or_else(|| {
+            dbg!(&helper.scope);
             err_generic(
                 &self,
                 &self,
@@ -506,8 +515,10 @@ impl<'script> PipelineInlineRaw<'script> {
                     d.params.substitute_args(&subq_args, &mut helper)?;
                     query_stmts.push(Stmt::WindowDefinition(Box::new(d)));
                 }
-                StmtRaw::Expr(e) => {
-                    return error_generic(&*e, &*e, &StmtRaw::BAD_EXPR, &helper.meta)
+                StmtRaw::Use(UseRaw { alias, module, .. }) => {
+                    let mid = ModuleManager::load(dbg!(&module))?;
+                    let alias = alias.unwrap_or_else(|| module.id.clone());
+                    helper.scope().add_module_alias(dbg!(alias), mid);
                 }
             }
         }
@@ -515,8 +526,10 @@ impl<'script> PipelineInlineRaw<'script> {
 
         let pipeline_stmt = PipelineCreate {
             mid: helper.add_meta_w_name(self.start, self.end, &self.id),
-            module: vec![], // FIXME
-            id: self.id,
+            node_id: NodeId {
+                module: vec![], // FIXME
+                id: self.id,
+            },
             port_stream_map: pipeline_stream_map,
         };
         Ok(pipeline_stmt)
