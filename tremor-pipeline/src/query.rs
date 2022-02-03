@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
+
 use crate::{
     common_cow,
     errors::{Error, ErrorKind, Result},
@@ -443,12 +445,31 @@ fn to_executable_graph(
             | Stmt::OperatorDefinition(_)
             | Stmt::PipelineDefinition(_) => {}
             Stmt::PipelineCreate(s) => {
-                if let Some(_p) = helper.get_pipeline(&s.node_id) {
+                if let Some(mut p) = helper.get_pipeline(&s.node_id) {
+                    // FIXME: do args
+                    let args = Value::null();
+                    p.apply_args(&args, &mut helper)?;
+                    // VERY FIXME: FIXME please fixme this is a nightmare
+                    let source = query.source.clone();
+                    let query = tremor_script::Query {
+                        query: tremor_script::srs::QueryInstance {
+                            raw: query.query.raw.clone(),
+                            query: unsafe { std::mem::transmute(p.query.unwrap().clone()) },
+                            artifact_id: p.node_id.clone(),
+                            instance_id: "FIXME: idk".to_string(),
+                        },
+                        source: source.clone(),
+                        warnings: BTreeSet::new(),
+                        locals: 0,
+                    };
+                    let stmts = query.extract_stmts();
+
+                    dbg!(to_executable_graph(&query, stmts, idgen, &source)?);
                     /*
                     add placeholder nodes
                     later inline this graph to the other
                     */
-                    todo!("inline all the things");
+                    panic!("inline all the things, this code needs to go away it's too bad");
                 } else {
                     return Err("oh no".into());
                 }
