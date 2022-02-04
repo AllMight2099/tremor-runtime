@@ -28,18 +28,21 @@ use hashbrown::HashMap;
 use std::{borrow::Borrow, collections::HashSet};
 use std::{sync::atomic::Ordering, time::Duration};
 use tremor_common::ids::{ConnectorIdGen, OperatorIdGen};
-use tremor_script::{
-    ast::{ConnectStmt, DeployEndpoint},
-    srs::{ConnectorDefinition, DeployFlow, QueryInstance},
-};
+use tremor_script::ast::{self, ConnectStmt, DeployEndpoint};
 
 /// unique identifier of a flow instance within a tremor instance
 #[derive(Debug, PartialEq, PartialOrd, Eq, Hash, Clone, Serialize)]
 pub struct FlowId(pub String);
 
-impl From<&DeployFlow> for FlowId {
-    fn from(f: &DeployFlow) -> Self {
-        FlowId(f.instance_id.id().to_string())
+// impl From<&ast::DeployFlow<'_>> for DeploymentId {
+//     fn from(f: &ast::DeployFlow<'_>) -> Self {
+//         DeploymentId(f.node_id.id().to_string())
+//     }
+// }
+
+impl From<&str> for DeploymentId {
+    fn from(e: &str) -> Self {
+        DeploymentId(e.to_string())
     }
 }
 
@@ -53,9 +56,9 @@ impl From<&DeployEndpoint> for ConnectorId {
     }
 }
 
-impl From<&ConnectorDefinition> for ConnectorId {
-    fn from(e: &ConnectorDefinition) -> Self {
-        ConnectorId(e.instance_id.clone())
+impl From<&str> for ConnectorId {
+    fn from(e: &str) -> Self {
+        ConnectorId(e.to_string())
     }
 }
 
@@ -72,9 +75,9 @@ impl From<&DeployEndpoint> for PipelineId {
     }
 }
 
-impl From<&QueryInstance> for PipelineId {
-    fn from(e: &QueryInstance) -> Self {
-        PipelineId(e.instance_id.clone())
+impl From<&str> for PipelineId {
+    fn from(e: &str) -> Self {
+        PipelineId(e.to_string())
     }
 }
 
@@ -124,7 +127,7 @@ pub struct StatusReport {
     /// the current state
     pub status: InstanceState,
     /// the crated connectors
-    pub connectors: Vec<ConnectorId>
+    pub connectors: Vec<ConnectorId>,
 }
 impl Flow {
     pub fn alias(&self) -> &str {
@@ -165,8 +168,8 @@ impl Flow {
     }
 
     pub(crate) async fn start(
-        src: String,
-        flow: DeployFlow,
+        _src: String,
+        flow: ast::DeployFlow<'static>,
         oidgen: &mut OperatorIdGen,
         cidgen: &mut ConnectorIdGen,
         known_connectors: &KnownConnectors,
@@ -174,44 +177,45 @@ impl Flow {
         let mut pipelines = HashMap::new();
         let mut connectors = HashMap::new();
 
-        for decl in &flow.decl.connectors {
-            let connector = crate::Connector::from_decl(decl)?;
-            // FIXME
-            connectors.insert(
-                ConnectorId::from(decl),
-                connectors::spawn(
-                    decl.instance_id.clone(),
-                    cidgen,
-                    known_connectors,
-                    connector,
-                )
-                .await?,
-            );
-        }
-        for decl in &flow.decl.pipelines {
-            let pipeline =
-                tremor_pipeline::query::Query(tremor_script::Query::from_troy(&src, decl)?);
-            let addr = pipeline::spawn(decl.instance_id.clone(), pipeline, oidgen).await?;
-            pipelines.insert(PipelineId::from(decl), addr);
+        for create in &flow.defn.creates {
+            let alias = create.instance_alias.id();
+            match &create.defn {
+                ast::CreateTargetDefinition::Connector(defn) => {
+                    let connector = crate::Connector::from_defn(alias, defn)?;
+                    // FIXME
+                    connectors.insert(
+                        ConnectorId::from(alias),
+                        connectors::spawn(alias, cidgen, known_connectors, connector).await?,
+                    );
+                }
+                ast::CreateTargetDefinition::Pipeline(defn) => {
+                    let query = defn.query.as_ref().unwrap();
+                    let pipeline = tremor_pipeline::query::Query(
+                        tremor_script::query::Query::from_query(query)?,
+                    );
+                    let addr = pipeline::spawn(alias, pipeline, oidgen).await?;
+                    pipelines.insert(PipelineId::from(alias), addr);
+                }
+            }
         }
 
         // link all the instances
-        for connect in &flow.decl.links {
+        for connect in &flow.defn.connections {
             link(&connectors, &pipelines, connect).await?;
         }
 
         let addr = spawn_task(
-            flow.instance_id.id().to_string(),
+            flow.instance_alias.id().to_string(),
             pipelines,
             connectors,
-            &flow.decl.links,
+            &flow.defn.connections,
         )
         .await?;
 
         addr.send(Msg::Start).await?;
 
-        let this = Flow {
-            alias: flow.instance_id.to_string(),
+        let this = Deployment {
+            alias: flow.instance_alias.to_string(),
             addr,
         };
 
@@ -351,8 +355,8 @@ async fn spawn_task(
             drain_rx.map(MsgWrapper::DrainResult),
             PriorityMerge::new(
                 stop_rx.map(MsgWrapper::StopResult),
-                start_rx.map(MsgWrapper::StartResult)
-            )
+                start_rx.map(MsgWrapper::StartResult),
+            ),
         ),
     );
     let addr = msg_tx;
@@ -565,7 +569,7 @@ async fn spawn_task(
                     let report = StatusReport {
                         alias: alias.clone(),
                         status: state,
-                        connectors
+                        connectors,
                     };
                     if let Err(e) = sender.send(Ok(report)).await {
                         error!("[Flow::{alias}] Error sending status report: {e}");
@@ -632,7 +636,10 @@ async fn spawn_task(
                 }
                 MsgWrapper::StartResult(conn_res) => {
                     if let Err(e) = conn_res.res {
-                        error!("[Flow::{alias}] Error starting Connector {conn}: {e}", conn=conn_res.alias);
+                        error!(
+                            "[Flow::{alias}] Error starting Connector {conn}: {e}",
+                            conn = conn_res.alias
+                        );
                         if state != InstanceState::Failed {
                             // only report failed upon the first connector failure
                             state = InstanceState::Failed;
